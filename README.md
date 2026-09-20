@@ -11,7 +11,9 @@
 - RGB-D 视觉里程计，输出三维和二维里程计
 - RGB-D 稀疏地图构建、轨迹与地图点发布
 - 保存 ORB-SLAM3 Atlas 和 TUM 格式轨迹
-- D455、D415 的 640×480@15 参数配置
+- 从 `CameraInfo` 动态读取 640×480 相机内参与畸变参数
+- 从 TF 动态读取机器人底盘到彩色相机光学坐标系的外参
+- D455、D415 的 640×480@15 参数模板
 - 可选里程计或地图坐标变换发布
 
 ## 快速开始
@@ -28,7 +30,10 @@
 | 话题 | 类型 | 说明 |
 |------|------|------|
 | `/camera/color/image_raw` | `sensor_msgs/Image` | 640×480 彩色图像 |
+| `/camera/color/camera_info` | `sensor_msgs/CameraInfo` | 彩色相机标定信息 |
 | `/camera/aligned_depth_to_color/image_raw` | `sensor_msgs/Image` | 640×480、对齐到彩色图像的深度图 |
+
+相机驱动还需发布从 `base_footprint` 到彩色相机光学坐标系的完整 TF 链， 见 linksee 的 tf 变换。
 
 安装依赖以及 orbslam3 的库
 
@@ -91,7 +96,9 @@ ros2 launch orbslam3_run rgbd_odometry.launch.py
 ros2 launch orbslam3_run rgbd_slam.launch.py
 ```
 
-默认使用 D455 配置。使用 D415 时分别指定对应配置：
+默认使用 D455 参数模板。相机内参、畸变、图像尺寸在运行时从
+`/camera/color/camera_info` 读取。使用 D415 时分别指定对应模板，以匹配其
+双目基线等参数：
 
 ```bash
 ros2 launch orbslam3_run rgbd_odometry.launch.py \
@@ -155,10 +162,11 @@ ros2 launch orbslam3_run rgbd_slam.launch.py --show-args
 
 ## 常见问题
 
-1. **持续提示图像尺寸错误**：确认彩色图和对齐深度图均为 640×480，本包不执行图像缩放。
+1. **持续提示图像尺寸错误**：确认 `CameraInfo`、彩色图和对齐深度图均为 640×480，本包不执行图像缩放。
 2. **跟踪状态不为 2**：检查 RGB-D 时间同步、深度和彩色图对齐，并确认场景中有足够纹理和光照。
 3. **启动时找不到 ORB-SLAM3**：确认 `/opt/orbslam3` 已安装库、头文件和 `share/orbslam3/ORBvoc.txt`；使用其他前缀时设置 `ORB_SLAM3_PREFIX`。
 4. **没有里程计 TF**：里程计模式默认 `publish_tf:=false`，需要时在启动命令中显式设置为 `true`。
+5. **一直等待相机外参 TF**：确认 `base_frame` 到彩色图像消息中 `frame_id` 的 TF 链完整，或通过启动参数修改 `base_frame`。
 
 ## 版本与发布
 

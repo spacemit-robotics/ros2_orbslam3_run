@@ -2,17 +2,7 @@
 File.version: "1.0"
 Camera.type: "PinHole"
 System.SaveAtlasToFile: "orbslam3_atlas"
-Camera1.fx: 387.36383056640625
-Camera1.fy: 386.9845886230469
-Camera1.cx: 323.29156494140625
-Camera1.cy: 241.57284545898438
-Camera1.k1: -0.04821427911520004
-Camera1.k2: 0.05453864485025406
-Camera1.p1: -0.0011744860094040632
-Camera1.p2: 0.0014560963027179241
-Camera1.k3: -0.016337666660547256
-Camera.width: 640
-Camera.height: 480
+# Intrinsics, distortion and image size are injected from CameraInfo at runtime.
 Camera.fps: 15
 Camera.RGB: 1
 Stereo.ThDepth: 40.0

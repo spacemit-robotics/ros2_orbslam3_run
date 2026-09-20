@@ -41,6 +41,10 @@ def generate_launch_description():
             default_value='/camera/aligned_depth_to_color/image_raw',
             description='对齐到彩色图像的深度输入话题'),
         DeclareLaunchArgument(
+            'camera_info_topic',
+            default_value='/camera/color/camera_info',
+            description='彩色相机标定信息话题'),
+        DeclareLaunchArgument(
             'odom_topic',
             default_value='/orbslam3/odom',
             description='里程计输出话题'),
@@ -69,6 +73,8 @@ def generate_launch_description():
                 ('/camera/color/image_raw', LaunchConfiguration('color_topic')),
                 ('/camera/aligned_depth_to_color/image_raw',
                  LaunchConfiguration('depth_topic')),
+                ('/camera/color/camera_info',
+                 LaunchConfiguration('camera_info_topic')),
                 ('odom', LaunchConfiguration('odom_topic')),
                 ('odom_2d', LaunchConfiguration('odom_2d_topic')),
                 ('tracking_state', LaunchConfiguration('tracking_state_topic')),

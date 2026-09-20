@@ -34,6 +34,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'depth_topic',
             default_value='/camera/aligned_depth_to_color/image_raw'),
+        DeclareLaunchArgument(
+            'camera_info_topic',
+            default_value='/camera/color/camera_info'),
         DeclareLaunchArgument('pose_topic', default_value='/orbslam3_slam/pose'),
         DeclareLaunchArgument('path_topic', default_value='/orbslam3_slam/path'),
         DeclareLaunchArgument(
@@ -70,6 +73,8 @@ def generate_launch_description():
             ('/camera/color/image_raw', LaunchConfiguration('color_topic')),
             ('/camera/aligned_depth_to_color/image_raw',
              LaunchConfiguration('depth_topic')),
+            ('/camera/color/camera_info',
+             LaunchConfiguration('camera_info_topic')),
             ('pose', LaunchConfiguration('pose_topic')),
             ('path', LaunchConfiguration('path_topic')),
             ('map_points', LaunchConfiguration('map_points_topic')),

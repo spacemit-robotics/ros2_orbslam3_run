@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -15,8 +16,15 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <std_msgs/msg/u_int8.hpp>
+#include <tf2/exceptions.hpp>
+#include <tf2/time.hpp>
+#include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
+
+#include "runtime_camera_config.hpp"
 
 class OrbSlam3OdometryNode final : public rclcpp::Node {
  public:
@@ -24,20 +32,23 @@ class OrbSlam3OdometryNode final : public rclcpp::Node {
   using SyncPolicy = message_filters::sync_policies::ApproximateTime<Image, Image>;
 
   OrbSlam3OdometryNode() : Node("orbslam3_odometry") {
-    const auto vocabulary = declare_parameter<std::string>("vocabulary");
-    const auto settings = declare_parameter<std::string>("settings");
+    vocabulary_ = declare_parameter<std::string>("vocabulary");
+    settings_template_ = declare_parameter<std::string>("settings");
     publish_tf_ = declare_parameter<bool>("publish_tf", false);
     odom_frame_ = declare_parameter<std::string>("odom_frame", "orb_odom");
     base_frame_ = declare_parameter<std::string>("base_frame", "base_footprint");
-    slam_ = std::make_unique<ORB_SLAM3::System>(
-        vocabulary, settings, ORB_SLAM3::System::RGBD, false);
-
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("odom", 10);
     odom_2d_pub_ = create_publisher<nav_msgs::msg::Odometry>("odom_2d", 10);
     state_pub_ = create_publisher<std_msgs::msg::UInt8>("tracking_state", 10);
     if (publish_tf_) {
       tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     }
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+    camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
+        "/camera/color/camera_info", rclcpp::SensorDataQoS(),
+        std::bind(&OrbSlam3OdometryNode::cameraInfoCallback, this,
+                  std::placeholders::_1));
 
     color_sub_.subscribe(this, "/camera/color/image_raw", rmw_qos_profile_sensor_data);
     depth_sub_.subscribe(this, "/camera/aligned_depth_to_color/image_raw",
@@ -48,38 +59,94 @@ class OrbSlam3OdometryNode final : public rclcpp::Node {
     sync_->registerCallback(std::bind(&OrbSlam3OdometryNode::imageCallback, this,
                                       std::placeholders::_1, std::placeholders::_2));
 
-    // base_link -> camera_link from the Linglong launch file, followed by
-    // this D455's factory color extrinsics and ROS optical-frame rotation.
-    Eigen::Isometry3f t_base_camera_link = Eigen::Isometry3f::Identity();
-    t_base_camera_link.translation() = Eigen::Vector3f(0.035f, 0.039f, 0.24f);
-    t_base_camera_link.linear() =
-        Eigen::AngleAxisf(0.523f, Eigen::Vector3f::UnitY()).toRotationMatrix();
-
-    Eigen::Isometry3f t_camera_link_color = Eigen::Isometry3f::Identity();
-    t_camera_link_color.translation() =
-        Eigen::Vector3f(0.0004737293f, -0.0587246418f, -0.0003930985f);
-    Eigen::Quaternionf q_link_color(0.9999964833f, 0.0018288863f,
-                                    -0.0018871640f, -0.0003029882f);
-    t_camera_link_color.linear() = q_link_color.normalized().toRotationMatrix();
-
-    Eigen::Isometry3f t_color_optical = Eigen::Isometry3f::Identity();
-    Eigen::Quaternionf q_color_optical(0.5f, -0.5f, 0.5f, -0.5f);
-    t_color_optical.linear() = q_color_optical.normalized().toRotationMatrix();
-    t_base_camera_optical_ =
-        t_base_camera_link * t_camera_link_color * t_color_optical;
-
-    RCLCPP_INFO(get_logger(), "ORB-SLAM3 RGB-D ready; waiting for synchronized images");
+    RCLCPP_INFO(get_logger(),
+                "Waiting for CameraInfo; intrinsics will be read from the topic "
+                "and extrinsics from TF");
   }
 
   ~OrbSlam3OdometryNode() override {
     if (slam_) slam_->Shutdown();
+    if (!runtime_settings_.empty()) {
+      std::error_code error;
+      std::filesystem::remove(runtime_settings_, error);
+    }
   }
 
  private:
+  void cameraInfoCallback(
+      const sensor_msgs::msg::CameraInfo::ConstSharedPtr &camera_info) {
+    std::lock_guard<std::mutex> lock(track_mutex_);
+    if (slam_) return;
+    try {
+      runtime_settings_ = orbslam3_run::createRuntimeCameraSettings(
+          settings_template_, *camera_info, get_name());
+      slam_ = std::make_unique<ORB_SLAM3::System>(
+          vocabulary_, runtime_settings_, ORB_SLAM3::System::RGBD, false);
+      RCLCPP_INFO(
+          get_logger(),
+          "Initialized ORB-SLAM3 from CameraInfo %ux%u (%s); runtime settings: %s",
+          camera_info->width, camera_info->height,
+          camera_info->header.frame_id.c_str(), runtime_settings_.c_str());
+      camera_info_sub_.reset();
+    } catch (const std::exception &error) {
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000,
+                            "Cannot initialize from CameraInfo: %s",
+                            error.what());
+    }
+  }
+
+  bool initializeCameraExtrinsics(const std::string &camera_frame) {
+    if (have_camera_extrinsics_) return true;
+    if (camera_frame.empty()) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "Color image frame_id is empty; cannot look up camera extrinsics");
+      return false;
+    }
+
+    try {
+      // lookupTransform(target, source) returns the transform source -> target.
+      const auto transform = tf_buffer_->lookupTransform(
+          base_frame_, camera_frame, tf2::TimePointZero);
+      const auto &translation = transform.transform.translation;
+      const auto &rotation = transform.transform.rotation;
+      Eigen::Quaternionf quaternion(
+          static_cast<float>(rotation.w), static_cast<float>(rotation.x),
+          static_cast<float>(rotation.y), static_cast<float>(rotation.z));
+      if (quaternion.squaredNorm() < 1e-12f) {
+        throw std::runtime_error("camera extrinsics contain a zero quaternion");
+      }
+
+      t_base_camera_optical_.setIdentity();
+      t_base_camera_optical_.translation() = Eigen::Vector3f(
+          static_cast<float>(translation.x), static_cast<float>(translation.y),
+          static_cast<float>(translation.z));
+      t_base_camera_optical_.linear() =
+          quaternion.normalized().toRotationMatrix();
+      have_camera_extrinsics_ = true;
+      RCLCPP_INFO(get_logger(),
+                  "Loaded camera extrinsics from TF: %s -> %s",
+                  base_frame_.c_str(), camera_frame.c_str());
+      return true;
+    } catch (const tf2::TransformException &e) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "Waiting for camera extrinsics TF %s -> %s: %s",
+          base_frame_.c_str(), camera_frame.c_str(), e.what());
+      return false;
+    }
+  }
+
   void imageCallback(const Image::ConstSharedPtr &color_msg,
                      const Image::ConstSharedPtr &depth_msg) {
     std::lock_guard<std::mutex> lock(track_mutex_);
     try {
+      if (!slam_) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "Waiting for color CameraInfo");
+        return;
+      }
+      if (!initializeCameraExtrinsics(color_msg->header.frame_id)) return;
+
       cv::Mat color = cv_bridge::toCvShare(color_msg)->image;
       cv::Mat depth = cv_bridge::toCvShare(depth_msg)->image;
       if (color.size() != depth.size()) {
@@ -148,6 +215,7 @@ class OrbSlam3OdometryNode final : public rclcpp::Node {
   }
 
   std::unique_ptr<ORB_SLAM3::System> slam_;
+  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
   message_filters::Subscriber<Image> color_sub_;
   message_filters::Subscriber<Image> depth_sub_;
   std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
@@ -155,11 +223,17 @@ class OrbSlam3OdometryNode final : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_2d_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr state_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   std::mutex track_mutex_;
   bool publish_tf_{false};
   bool have_origin_{false};
+  bool have_camera_extrinsics_{false};
   std::string odom_frame_;
   std::string base_frame_;
+  std::string vocabulary_;
+  std::string settings_template_;
+  std::string runtime_settings_;
   Eigen::Isometry3f t_world_camera_origin_{Eigen::Isometry3f::Identity()};
   Eigen::Isometry3f t_base_camera_optical_{Eigen::Isometry3f::Identity()};
 };

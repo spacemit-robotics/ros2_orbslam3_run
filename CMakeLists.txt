@@ -43,6 +43,7 @@ find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -61,7 +62,7 @@ target_include_directories(orbslam3_odometry_node PRIVATE
   ${Pangolin_INCLUDE_DIRS})
 ament_target_dependencies(orbslam3_odometry_node
   rclcpp sensor_msgs nav_msgs std_msgs geometry_msgs cv_bridge
-  message_filters tf2_ros)
+  message_filters tf2 tf2_ros)
 target_link_libraries(orbslam3_odometry_node
   ORB_SLAM3::ORB_SLAM3
   ${OpenCV_LIBS}
@@ -87,7 +88,7 @@ target_include_directories(orbslam3_slam_node PRIVATE
   ${Pangolin_INCLUDE_DIRS})
 ament_target_dependencies(orbslam3_slam_node
   rclcpp sensor_msgs geometry_msgs nav_msgs std_msgs std_srvs cv_bridge
-  message_filters tf2_ros)
+  message_filters tf2 tf2_ros)
 target_link_libraries(orbslam3_slam_node
   ORB_SLAM3::ORB_SLAM3
   ${OpenCV_LIBS}
